@@ -1,52 +1,63 @@
 const express = require('express');
-const { chromium } = require('playwright');
+const { chromium } = require('playwright-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+chromium.use(StealthPlugin());
 const app = express();
+
+function isCf(title, html) {
+  return /Attention Required|Just a moment/i.test(title) ||
+         /cf-browser-verification|cf-challenge|__cf_chl_captcha/i.test(html || '');
+}
+
+function ctxOptions() {
+  return {
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/127 Safari/537.36',
+    locale: 'en-US',
+    timezoneId: 'Europe/Berlin',
+    viewport: { width: 1366, height: 768 },
+    javaScriptEnabled: true
+  };
+}
 
 app.get('/render', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'missing url' });
   let browser;
   try {
-    browser = await chromium.launch({ args: ['--no-sandbox'] });
-    const ctx = await browser.newContext();
-    const page = await ctx.newPage();
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-dev-shm-usage'
+      ],
+      proxy: process.env.OUTBOUND_PROXY_URL
+        ? {
+            server: process.env.OUTBOUND_PROXY_URL,
+            username: process.env.OUTBOUND_PROXY_USERNAME,
+            password: process.env.OUTBOUND_PROXY_PASSWORD
+          }
+        : undefined
+    });
+
+    // Persist cookies (helps if CF issues clearance cookies)
+    const context = await browser.newContext({ ...ctxOptions() });
+    const page = await context.newPage();
+
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    for (let i = 0; i < 5; i++) {
+      const title = await page.title();
+      const html = await page.content();
+      if (!isCf(title, html)) break;
+      await page.waitForTimeout(4000);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+    }
+
     const html = await page.content();
     await browser.close();
     res.type('text/html').send(html);
-  } catch (e) {
-    if (browser) await browser.close();
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// Optional JSON extractor for game-tournaments.com/dota2 match pages
-app.get('/extract/gt', async (req, res) => {
-  const id = req.query.id;
-  if (!id) return res.status(400).json({ error: 'missing id' });
-  const matchUrl = `https://game-tournaments.com/en/dota-2/matches/${id}`;
-  let browser;
-  try {
-    browser = await chromium.launch({ args: ['--no-sandbox'] });
-    const page = await browser.newContext().then(c => c.newPage());
-    await page.goto(matchUrl, { waitUntil: 'networkidle', timeout: 30000 });
-    const data = await page.evaluate(() => {
-      const pickBlocks = Array.from(document.querySelectorAll('div.heroes'));
-      const getHeroes = blk =>
-        Array.from(blk.querySelectorAll('div.card')).slice(0, 5).map(c => ({
-          name: c.querySelector('.hero-title')?.textContent?.trim() || '',
-          img: c.querySelector('img')?.getAttribute('src') || ''
-        }));
-      const t1 = pickBlocks[0] ? getHeroes(pickBlocks[0]) : [];
-      const t2 = pickBlocks[1] ? getHeroes(pickBlocks[1]) : [];
-      const up = document.querySelector('.team-name-up')?.textContent?.trim() || 'Radiant';
-      const down = document.querySelector('.team-name-down')?.textContent?.trim() || 'Dire';
-      const league = document.querySelector('a[itemprop=description][title]')?.getAttribute('title') ||
-                     document.querySelector('title')?.textContent?.trim() || '';
-      return { league, team1Name: up, team2Name: down, team1: t1, team2: t2 };
-    });
-    await browser.close();
-    res.json(data);
   } catch (e) {
     if (browser) await browser.close();
     res.status(500).json({ error: e.message });
