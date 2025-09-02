@@ -1,0 +1,13 @@
+{
+  "name": "playwright-render",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "npx playwright install --with-deps chromium"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.45.0"
+  }
+}
